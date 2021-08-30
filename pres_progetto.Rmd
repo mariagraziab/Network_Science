@@ -1,0 +1,927 @@
+---
+title: "Network and Text Analysis of  the book 'War and Peace'"
+author: '*Maria Grazia Berni*'
+date: '*August 30, 2021*'
+output: 
+  ioslides_presentation:
+    css: style.css
+    incremental: yes
+editor_options: 
+  chunk_output_type: inline
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,cache = TRUE, message = FALSE, warnings= FALSE)
+                
+
+```
+
+
+## Introduction
+The aim of this project is the analysis of a literature text using combinations of methods which are specific of the field of the data science, network science and text mining. 
+The Tolstoy novel "War and Peace", given the huge number of characters, ambientations, and events that characterize it, it is well suited for this purpose.
+
+
+
+
+```{r import, include = FALSE, warning = FALSE}
+library(dplyr)
+library(readr)
+library(stringr)
+library(gutenbergr)
+library(tidytext)
+library(tidyr)
+library(rbokeh)
+library(maps)
+library(widyr)
+library(ggraph)
+library(igraph)
+library(CINNA)
+require(gridExtra)
+library(corrplot)
+library(RColorBrewer)
+library(tidygraph)
+library(wordcloud)
+library(d3heatmap)
+data("stop_words")
+```
+
+## Ambientation
+
+```{r books_processing, include = FALSE, warning = FALSE,cache=TRUE}
+str_b<-c("BOOK ONE|BOOK TWO|BOOK THREE|BOOK FOUR|BOOK FIVE|BOOK SIX|BOOK SEVEN|BOOK EIGHT|BOOK NINE|BOOK TEN|BOOK ELEVEN|BOOK TWELVE|BOOK THIRTEEN|BOOK FOURTEEN|BOOK FIFTEEN|
+          BOOK SEVENTEEN|BOOK EIGHTEEN| BOOK NINETEEN|BOOK TWENTY|BOOK TWENTYONE")
+war_peace <- gutenberg_download(2600,meta_fields = "author", mirror="http://mirrors.xmission.com/gutenberg/")
+many_books <- gutenberg_download(c(2600,36,1400,174,11),meta_fields = "author", mirror = "http://mirrors.xmission.com/gutenberg/")
+process_book <- function(book){
+  book%>%group_by(author)%>%mutate(linenumber = row_number(),chapter = cumsum(str_detect(text, regex("^(Chapter) [\\divxlc]|^CHAPTER", ignore_case = TRUE))))%>%
+  ungroup()%>%filter(!chapter==0)%>%mutate(text=str_replace(text,regex("^chapter [\\divxlc].*",ignore_case = TRUE),"chapter "))
+}
+
+wp_book<-process_book(war_peace)
+oth_books<-process_book(many_books)
+
+sent_book<-wp_book%>%mutate(book = 1+cumsum(str_detect(text, str_b)))  #this will be used for the sentiment analysis
+pattern="[0-9]{4}"
+#str_detect(wp_book$text,pattern)
+#some books (for instance war and peace) contain different symbols for the apostrophe, so I have to create a new data-frame of stop_words
+new_stop_words <- stop_words%>%mutate(word=str_replace(word,"'","’"))
+new_stop_words <- full_join(new_stop_words,stop_words)%>%unique()
+#find capital word and delete genitive to avoid that the same word will be counted times 
+find_capital_words<-function(tidy_book,stop_w){
+  tidy_book%>%unnest_tokens(word,text,to_lower = FALSE)%>%filter(str_detect(word,"^[A-Z]"))%>%mutate(word=tolower(word))%>%
+    anti_join(stop_w)%>%mutate(word = str_replace(word,"'s|’s",""))%>%
+    group_by(word)%>%summarise(n2 = n())
+  
+}
+
+capital_words_war_peace <- find_capital_words(wp_book,new_stop_words)
+
+books <-oth_books%>%unnest_tokens(word,text)%>%anti_join(new_stop_words)%>%mutate(word = str_replace(word,"'s|’s",""))%>%
+count(author, word, sort =TRUE)%>%ungroup()
+aut<-"Tolstoy, Leo, graf"
+tolstoy<-books%>%bind_tf_idf(word,author,n)%>%filter(author==aut)%>%filter(tf_idf>0)%>%arrange(desc(tf_idf))
+titles <- c("general","sergeant","major","officier","lintenant","captain","colonel","general","count","earl","countess",
+            "king","queen","prince","princess","duke","duchess","viscount","viscountess","baron","baroness")
+
+nodes_places <-tolstoy%>%inner_join(capital_words_war_peace,by = "word")%>%mutate(diff = n2-n)%>%filter(diff==0 | word %in% titles)
+Places <- world.cities%>%mutate(word=tolower(country.etc))%>%dplyr::select(word)%>%unique()
+nations_in_book<-inner_join(nodes_places,Places,by="word")
+nodes_places<-nodes_places%>%anti_join(nations_in_book,by="word")
+cities <- world.cities%>%mutate(country.etc=tolower(country.etc))%>%
+          filter(country.etc %in% nations_in_book$word)%>%mutate(word=tolower(name))
+# "anna" is more probably a name 
+new_cities <- inner_join(nodes_places,cities,by="word")%>%filter(!word=="anna")
+#sometimes cities have more names, the most recognizable is the last one. 
+new_cit<-cities%>%mutate(old_word=word)%>%mutate(word = word(word,-1)) 
+nc2<-inner_join(nodes_places,new_cit,by="word")
+multigram_cities <- nc2%>%anti_join(new_cities,by="word")%>%filter(!word=="anna")
+#only one is relevant 
+add_city <- multigram_cities%>%filter(word=="petersburg")%>%mutate(word = old_word)%>%dplyr::select(author:capital)
+new_cit<-cities%>%mutate(old_word=word)%>%mutate(word = word(word,1)) 
+nc2<-inner_join(nodes_places,new_cit,by="word")
+multigram_cities_2 <- nc2%>%anti_join(new_cities,by="word")%>%filter(!word=="anna")
+book_cities <-rbind(new_cities,add_city)%>%arrange(desc(n))
+#save(book_cities, file="book_cities.Rda")
+```
+The novel is set in the Europe of the XIX century. Extracting from the text all the capital words and combining them with the words having a hight idf index, where this last one is calculated taking into account even different books, it is possible,with some precautions, to recover all the cities of the novel's setting. 
+```{r how_places, echo = FALSE, warning = FALSE,cache=TRUE}
+
+new_cities$nn<- prettyNum(new_cities$n, big.mark = ",")
+plot <- suppressWarnings(figure(width = 800, height = 450, padding_factor = 0) %>%
+                           ly_map("world", col = "gray") %>%
+                           ly_points(long, lat, data = new_cities, size = 5,
+                                     hover = c(name, country.etc, nn)))
+
+widgetframe::frameWidget(plot,width=600,height=400)
+
+```
+
+```{r nodes_detection, include = FALSE, warning = FALSE,cache=TRUE}
+#characters of the book 
+nodes <- nodes_places%>%anti_join(new_cities, by = "word")%>%filter(!word=="petersburg")
+#many of them represents the same character, so it is necessry to find the entire name of the character and  all hiss nickname, 
+#this is necessary for the network analysis, however in this situation is enough complicated because there are characters that have 
+#a lot of names, so it will follow a huge code 
+
+#I calculate the bigrams that are truly consecutive, because the function for bigrams automatically removes punctuation, I replace all the punctuation 
+#with The symbol a__a 
+
+#with this Ifunction I recover the punctuation 
+punctuation_fun <- function(book){
+  without_punctuation <- book%>%unnest_tokens(word,text)
+  punctuation <-book%>%unnest_tokens(word,text,strip_punct=FALSE)
+  punctuation<-punctuation%>%anti_join(without_punctuation,by="word")%>%select(word)%>%unique()
+  return(punctuation)
+}
+
+punctuation <- punctuation_fun(wp_book)$word[1:17]
+punctuation[8] <-"\\?"
+punctuation[3]<-"\\."
+punctuation[13]<-"\\("
+punctuation[14]<-"\\)"
+punctuation[15]<-"\\*"
+delet <- str_c(punctuation,collapse = "|")   #reg expression 
+#I add the symbol in the stop words 
+new_stop_a <- tibble(word ="a__a",lexicon="SMART")
+stop_words_punct<-new_stop_words%>%full_join(new_stop_a)
+wp_book2 <- wp_book 
+#replace the symbol in place of punctuation
+wp_book2$text<-str_replace_all(wp_book$text,delet," a__a ")
+bigrams<-wp_book2%>%unnest_tokens(bigram, text, token = "ngrams", n=2)%>%filter(!is.na(bigram))%>%
+                    separate(bigram, c("word1", "word2"), sep = " ")
+#I recover the couple of words that truly appears near each other. I'm interested in this because if at least a coupletime one character name is 
+#adjacent to another name, they probably are the same person 
+bigrams<-bigrams%>%filter(!word1 %in% stop_words_punct$word,!word2 %in% stop_words_punct$word)%>%#filter(!word2 %in% stop_words_punct$word)%>%
+  mutate(word1 = str_replace(word1,"'s|’s",""),word2 = str_replace(word2,"'s|’s",""))
+bigrams<- bigrams%>%count(word1,word2,sort=TRUE)
+#other words to remove 
+c<-c("january","february","march","april","may","june","july","august","september","october","november","december",
+     "monday","tuesday","wednesday","thursday","friday","saturday","sunday","god","africa","campan","prussia","europe","iii")
+nodes<-nodes%>%filter(!word %in% c)
+all_nodes <- nodes$word 
+nodes<-nodes%>%mutate(other_word= word)
+#find couples that are near 
+other_names <-function(x){ 
+  name_2 <-c(x) 
+  a<-bigrams%>%filter(word1==x,word2 %in% nodes$word)
+  b<-bigrams%>%filter(word2==x,word1 %in% nodes$word)
+  ss<-rbind(a,b)
+  ss<-ss%>%filter(ss$n>1)
+  name_2<-c(name_2,ss$word1,ss$word2)
+  name_2<-unique(name_2)
+  name_2<-name_2[-1] 
+  return(name_2)
+}
+
+nodes$other_word <- sapply(nodes$word,other_names,simplify=TRUE)  
+corr_fun <- function(w1,w2){ 
+  a <- bigrams%>%filter(word1==w1,word2==w2)
+  b <- bigrams%>%filter(word2==w1,word1==w2)
+  ss<-rbind(a,b)
+  sinonimi<-c(ss$word1,ss$word2)
+  l <- length(sinonimi)
+  logic_cond <- l>0
+  return(logic_cond)
+}
+
+nodes<-nodes%>%mutate(tot=list("null"))
+
+#find words that are all correlated to each other 
+#and belongs to the same character, must be applied many times 
+utility_function <-function(word, sinon, total){ 
+  if(!total == "null"){ 
+    lista_return<-list(total,"null")
+    return(lista_return)
+  }
+  sinonimi <- c() 
+  n<-length(sinon)
+  if(n==0){ 
+    sinonimi<-c(sinonimi,word)
+    lista_return<-list(sinonimi,"null")
+    return(lista_return)
+  }
+  
+  if(n==1){
+    sinonimi <-c(sinonimi,word,sinon[1])
+    lista_return <- list(sinonimi,"null")
+    return(lista_return)
+  }
+  sinonimi <- c(sinonimi,word) 
+  new_sin <-sinon
+  for (i in 1:(n-1)){
+    for (j in (i+1):n){
+      if(!corr_fun(new_sin[i],new_sin[j])){
+        
+        if(i>1){
+          sinonimi <-c(sinonimi,new_sin[1:i-1],new_sin[j])
+          new_sin[j] = new_sin[i]
+           }else{
+          sinonimi <-c(sinonimi,new_sin[j])
+          new_sin[j] = word
+        }
+        
+      }
+    }
+  }
+  
+  new_sin<-c(new_sin,word)
+  sinonimi<-unique(sinonimi) 
+  sinonimi<-sinonimi[-1] 
+  if(length(sinonimi)==0){
+    sinonimi <-c("null")
+  }
+  
+  new_sin <- unique(new_sin)
+  if(length(sinonimi)==n){
+    sinonimi<-setdiff(sinonimi,new_sin)
+  }
+  lista_return <- list(new_sin,sinonimi)
+  return(lista_return)
+
+  
+}
+
+s_fun1<-function(word,sinon,total){
+  lista <-utility_function(word,sinon,total)
+  return(lista[1])
+  
+}
+
+s_fun2<-function(word,sinon,total){
+  lista <-utility_function(word,sinon,total)
+  return(lista[2])
+}
+n<-length(nodes$word)
+
+while(!n==0){ 
+  nodes2<-nodes
+  nodes$tot<- mapply(s_fun1,nodes$word,nodes$other_word,nodes$tot)
+  nodes2$other_word<-mapply(s_fun2,nodes2$word,nodes2$other_word,nodes2$tot)
+  nodes2<-nodes2%>%filter(!other_word=="null")
+  nodes<-full_join(nodes,nodes2)
+  n<-length(nodes2$word)
+  #print(n)
+}
+  backup_nodi <- nodes
+
+len<-length(nodes$word)
+for(i in 1:len){
+  nodes$tot[[i]]<-sort(nodes$tot[[i]])
+  
+}
+nodes<-nodes%>%select(tot)%>%unique()
+  
+section_nodes<- war_peace%>%mutate(chapter = cumsum(str_detect(text, regex("^(Chapter|CHAPTER) [\\divxlc]", ignore_case = TRUE))))%>%filter(!chapter==0)
+section_nodes <-section_nodes%>%mutate(section = row_number()%/%6)%>%filter(section>0)%>%unnest_tokens(word,text)%>%
+           anti_join(new_stop_words)%>%mutate(word = str_replace(word,"'s|’s",""))%>%
+           filter(word %in% backup_nodi$word)
+
+v<-max(mapply(length,nodes$tot))   
+
+
+nodes<-nodes%>%mutate(word1="null",word2="null",word3="null")%>%mutate(n=1)
+ll<-length(nodes$tot)
+for (i in 1:ll){
+  n<-length(nodes$tot[[i]])
+  nodes$n[[i]]<-n
+  string1 <- unlist(nodes$tot[[i]])[1]
+  nodes$word1[[i]]<-string1
+  if(n==1){
+    nodes$tot[[i]]<-string1
+    next
+  }
+  string2 <- unlist(nodes$tot[[i]])[2]
+  nodes$word2[[i]]<-string2
+  if (n==2){
+    nodes$tot[[i]]<-paste(string1,string2,sep=" ")
+    next
+  }
+  string3 <- unlist(nodes$tot[[i]])[3]
+  nodes$word3[[i]]<-string3
+  nodes$tot[[i]]<-paste(string1,string2,string3,sep=" ")
+  
+}
+
+nodes <- nodes%>%mutate(id=1:length(nodes$tot))
+first <- nodes%>%filter(n==1)
+second<-nodes%>%filter(n==2)
+third<-nodes%>%filter(n==3)
+l1 <-length(first$tot)
+l2 <- length(second$tot)
+l3 <-length(third$tot)
+for (i in 1:l2){
+  for (j in 1:l3){
+    if(second$word1[i] == third$word1[j] | second$word1[i] == third$word2[j]){
+      if(second$word2[i] == third$word2[j] | second$word2[i] == third$word3[j]){
+
+        second$word1[i]= "null"
+      }
+    }
+
+  }
+}
+second<-second%>%filter(!word1=="null")
+l2 <- length(second$tot)
+
+for (i in 1:l1){
+  for(j in 1:l2){
+    if(first$word1[i]==second$word1[j]|first$word1[i]==second$word2[j]){
+      first$word1[i]= "null"
+    }
+  }
+  for(k in 1:l3){
+    if(first$word1[i]==third$word1[k]|first$word1[i]==third$word2[k]|first$word1[i]==third$word3[k]){
+      first$word1[i]= "null"
+    }
+  }
+}
+first<-first%>%filter(!word1=="null")
+
+final_nodes<-rbind(first,second,third)
+final_nodes_backup<-final_nodes
+final_nodes<-final_nodes%>%mutate(tot =unlist(tot))
+saveRDS(final_nodes, "final_nodes.Rsa")
+
+```
+
+## Characters 
+Extracting the names of the main character it is quite challenging, because many of them have more then one name, royal appellations and surnames. 
+Some of the main characters of the novel:
+```{r characters, echo = FALSE, warning = FALSE,cache=TRUE}
+
+(final_nodes%>%filter(n>2))$tot
+
+```
+ 
+```{r section_process, eval=FALSE, include = FALSE, warning = FALSE,cache=TRUE}
+
+#replaces the extended names of the characters in the text associated with the section words
+
+#it takes time to complete the run 
+update_n <-section_nodes%>%filter(word %in% first$tot)
+
+section_nodes <-section_nodes%>%anti_join(update_n)
+new_sec<-section_nodes%>%mutate(id = 1:length(section_nodes$word))%>%mutate(solved = FALSE)%>%mutate(remove = FALSE)
+lung <-length(new_sec$id)
+
+
+
+for (i in 1:lung){
+  
+  word1 <-(new_sec%>%filter(id ==i))$word
+  solved <-(new_sec%>%filter(id ==i))$solved
+  
+  ll <- length(word1)
+  if (ll==0 | solved){
+    next    
+  }
+  
+  
+  sect <- (new_sec%>%filter(id ==i))$section 
+  
+  new_sub<- new_sec%>%filter(section==sect | section==sect-1 | section==sect+1)%>%filter(solved==FALSE)%>%mutate(new_id =i-id)%>%
+    arrange(abs(new_id))
+  
+  for(a in new_sub$new_id){
+    if(a==0) next
+    word2 <- (new_sub%>%filter(new_id == a))$word
+    v<-sort(c(word1,word2))
+    w1<-v[1]
+    w2<-v[2]
+    n<-(final_nodes%>%filter(word1==w1,word2==w2))$n  
+    
+    dati<-length(n)
+    if(dati==1 ){
+      one_word<-final_nodes%>%filter(word1==w1,word2==w2)
+      final_word <- one_word$tot 
+      new_sec$word[i]<-final_word 
+      new_sec$solved[i] <-TRUE 
+      true_id <-(new_sub%>%filter(new_id == a))$id
+      new_sec$solved[true_id]<-TRUE
+      new_sec$remove[true_id]<-TRUE
+      
+      
+    }
+    if(length(n)==0){n=0}
+    
+    if(dati >1 || n>2){
+      c<-split(new_sub$new_id,abs(new_sub$new_id)>a)
+      if(length(names(c))==1 && names(c)[1]=='FALSE'){next} 
+      c<-c$'TRUE'
+      for (j in c){
+        w3 <- (new_sub%>%filter(new_id == j))$word
+        one_word<-final_nodes%>%filter(word1==w1,word2==w2,word3==w3)
+        lll <-length(one_word$tot)
+        if(lll==1){
+          final_word <- one_word$tot 
+          new_sec$word[i]<-final_word 
+          new_sec$solved[i] <-TRUE 
+          true_id <-(new_sub%>%filter(new_id == j))$id
+          new_sec$solved[true_id]<-TRUE
+          new_sec$remove[true_id]<-TRUE 
+          true_id <-(new_sub%>%filter(new_id == a))$id
+          new_sec$solved[true_id]<-TRUE
+          new_sec$remove[true_id]<-TRUE  
+          break
+          
+          
+        }
+        
+        
+        
+        
+      }
+      
+      break   
+    }
+    
+    n<-(final_nodes%>%filter(word1==w1,word3==w2))$n 
+    dati<-length(n)
+    if(dati==1){
+      one_word<-final_nodes%>%filter(word1==w1,word3==w2)
+      final_word <- one_word$tot 
+      new_sec$word[i]<-final_word 
+      new_sec$solved[i] <-TRUE 
+      true_id <-(new_sub%>%filter(new_id == a))$id
+      new_sec$solved[true_id]<-TRUE
+      new_sec$remove[true_id]<-TRUE
+      
+      
+    }
+    if(length(n)==0){n=0}
+    dati<-length(n)
+    if(dati >1 || n>2){
+      c<-split(new_sub$new_id,abs(new_sub$new_id)>a)
+      if(length(names(c))==1 && names(c)[1]=='FALSE'){next} 
+      c<-c$'TRUE'
+      for (j in c){
+        w3 <- (new_sub%>%filter(new_id == j))$word
+        one_word<-final_nodes%>%filter(word1==w1,word2==w3,word3==w2)
+        lll <-length(one_word$tot)
+        if(lll==1){
+          final_word <- one_word$tot 
+          new_sec$word[i]<-final_word 
+          new_sec$solved[i] <-TRUE 
+        
+          true_id <-(new_sub%>%filter(new_id == j))$id
+          new_sec$solved[true_id]<-TRUE
+          new_sec$remove[true_id]<-TRUE 
+          true_id <-(new_sub%>%filter(new_id == a))$id
+          new_sec$solved[true_id]<-TRUE
+          new_sec$remove[true_id]<-TRUE  
+          break
+          
+          
+        }
+        
+        
+        
+        
+      }
+      
+      break
+    }
+    
+    n<-(final_nodes%>%filter(word2==w1,word3==w2))$n 
+    dati<-length(n)
+    if(dati==1){
+      one_word<-final_nodes%>%filter(word2==w1,word3==w2)
+      final_word <- one_word$tot 
+      new_sec$word[i]<-final_word 
+      new_sec$solved[i] <-TRUE 
+      true_id <-(new_sub%>%filter(new_id == a))$id
+      new_sec$solved[true_id]<-TRUE
+      new_sec$remove[true_id]<-TRUE
+      
+      
+    }
+    if(length(n)==0){n=0}
+    # dati<-length(n)
+    if(dati >1 || n>2){
+      c<-split(new_sub$new_id,abs(new_sub$new_id)>a)
+      if(length(names(c))==1 && names(c)[1]=='FALSE'){next} 
+      c<-c$'TRUE'
+      for (j in c){
+        w3 <- (new_sub%>%filter(new_id == j))$word
+        one_word<-final_nodes%>%filter(word1==w3,word2==w1,word3==w2)
+        lll <-length(one_word$tot)
+        if(lll==1){
+          final_word <- one_word$tot 
+          new_sec$word[i]<-final_word 
+          new_sec$solved[i] <-TRUE 
+          true_id <-(new_sub%>%filter(new_id == j))$id
+          new_sec$solved[true_id]<-TRUE
+          new_sec$remove[true_id]<-TRUE 
+          true_id <-(new_sub%>%filter(new_id == a))$id
+          new_sec$solved[true_id]<-TRUE
+          new_sec$remove[true_id]<-TRUE  
+          break
+          
+          
+        }
+        
+        
+        
+        
+      }
+      
+      break
+    }
+    
+    
+    
+  }
+}
+
+```
+```{r solve_sect, eval = FALSE,include= FALSE, warning = FALSE,cache=TRUE}
+
+new_sec <- new_sec%>%filter(remove==FALSE)
+l<-length(new_sec$word)
+new_sec<-new_sec%>%mutate(id=1:l)
+
+not_solved <-new_sec%>%filter(solved==FALSE)
+ll<-length(not_solved$word)
+for (i in 1:ll){
+  
+  word<-not_solved$word[i]
+  node_id<-not_solved$id[i]
+  sec<-not_solved$section[i]
+  group_id <- (new_sec%>%filter(section==sec|section==(sec-1))%>%filter(id<node_id)%>%filter(solved==TRUE))$id
+  group_id<-sort(group_id,decreasing=TRUE)
+  for(j in group_id){
+    completed_word <- new_sec$word[j]
+    cond<- str_detect(completed_word,word)
+    if(cond){
+      new_sec$word[node_id]<-completed_word
+      new_sec$solved[node_id]<-TRUE
+      break
+    }
+    
+  }
+  
+}
+
+new_sec <-new_sec%>%filter(solved==TRUE)
+new_sec<-new_sec%>%select(chapter:word)
+update_n<-update_n%>%select(chapter:word)
+
+nodes_interactions<-full_join(new_sec,update_n)
+nodes_interactions2<-nodes_interactions
+saveRDS(nodes_interactions,file="nodesInteractions.Rda")
+
+```
+
+
+
+
+```{r load, include = FALSE, warning = FALSE,cache=FALSE}
+
+readRDS("nodesInteractions.Rda")
+nodes_interactions<-readRDS("nodesInteractions.Rda")
+```
+
+
+## Characters Interactions
+Once the main characters have been extracted, it is useful to find the network of interaction between them.
+There will be an interaction between two characters whenever they appear together within a section consisting of 6 lines.
+Whether this choice is appropriate or not depends on the circumstances, 
+The result is an indirect weighted graph, in which the weight of the arcs represents the number of interactions between the linked characters.
+```{r node_interaction, include = FALSE, warning = FALSE,cache=TRUE}
+
+pairs_interactions<- nodes_interactions%>%pairwise_count(word, section, sort = TRUE)
+pairs_interactions<- pairs_interactions%>%filter(n>3)
+data_fr <- pairs_interactions%>%mutate(from=item1,to =item2,weight=n)%>%select(from,to,weight)
+data_fr <- data.frame(t(apply(data_fr,1,sort)))
+data_fr <- data_fr%>%unique()
+data_fr<- data_fr%>%mutate(from=X2,to=X3,weight=X1)%>%select(from,to,weight)
+data_fr<- data_fr%>%mutate(weight=as.numeric(levels(weight[weight])[weight]))
+saveRDS(data_frame,file = "final_data_frame.Rda")
+
+vertici <- pairs_interactions%>%select(item1)%>%unique()
+g= graph_from_data_frame(data_fr, directed = FALSE, vertices = vertici)
+E(g)$weight = data_fr$weight
+g2<- graph_from_data_frame(data_fr, directed = FALSE, vertices = vertici)
+```
+
+## Network of the Characters  
+Some nodes are not connected with the giant component 
+```{r net, echo = FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+
+Strength = strength(g2,mode="total")
+Weight = E(g2)$weight
+ggraph(g2) +
+  geom_edge_link(aes(alpha = Weight)) +
+  geom_node_point(aes(size = Strength, 
+                      colour = Strength)) + 
+  scale_color_gradient(guide = 'legend')
+
+```
+
+## Giant Component  
+```{r giant_extraction, include= FALSE, warning = FALSE,cache=TRUE}
+
+g3<-giant_component_extract(g2, directed = FALSE)
+giant_component <-g3[[1]]
+
+```
+
+```{r giant_network, echo = FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+Strength = strength(giant_component,mode="total")
+Weight = E(giant_component)$weight
+ggraph(giant_component) +
+  geom_edge_link(aes(alpha = Weight)) +
+  geom_node_point(aes(size = Strength, 
+                      colour = Strength)) + 
+  scale_color_gradient(guide = 'legend')
+
+
+```
+
+## Strength 
+```{r strength, echo = FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+new_data_frame <- as_data_frame(g2, what="vertices")%>%mutate(Strength=strength(g2,mode="total"))
+new_data_frame%>%filter(Strength>100)%>%ggplot(aes(x = name, y = Strength))+
+  geom_bar(stat = 'identity', fill = 'blue4') +
+  labs(
+    title = 'Characters with the highest Strength Value',
+    
+    x = '',
+    y = 'Strength'
+  ) +
+  coord_flip()+
+  theme_classic()
+
+
+```
+
+
+## Degree and Strength Distribution 
+```{r distrib, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+new_data_frame<-new_data_frame%>%mutate(degree = degree(g2))
+degree<-degree(g2)
+strength<-strength(g2,mode = "total")
+pl1<-new_data_frame%>%ggplot()+
+  geom_histogram(mapping = aes(x = degree), binwidth = 4,fill="#54aedb")+
+  theme_classic() + ggtitle("Degree Distribution")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+pl2<-new_data_frame%>%ggplot()+
+  geom_histogram(mapping = aes(x = strength), binwidth = 60,fill="#2930ac")+
+  theme_classic() + ggtitle("Strength Distribution")+
+  theme(plot.title = element_text(hjust = 0.5))
+  
+```
+```{r distribution, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+grid.arrange(pl1,pl2, nrow=2)
+```
+
+## Power Low Network : degree distribution
+Are they Power-Low networks? 
+```{r power_low, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+sorted_degree<-sort(degree(g2))
+sorted_strength<-sort(strength(g2))
+ccdf = function(d) {
+  n = length(d)
+  max = max(d)
+  p = rep(0, max)
+  for (i in 1:length(p)) {
+    p[i] = length(d[d >= i]) / n
+  } 
+  return(p)
+}
+links <-3
+lll<-ccdf(sorted_degree)
+#par(mfrow=c(1,1))
+
+  
+```
+```{r power_low_degree, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+plot(links:max(sorted_degree), lll[links:length(lll)], log="xy", type = "l", xlab="Degree", ylab="CCDF",main="Log-Log plot of Cumultive Degree Distribution")
+
+```
+
+## Strength Distribution 
+
+```{r power_low_strength, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+lll<-ccdf(sorted_strength)
+plot(links:max(sorted_strength), lll[links:length(lll)], log="xy", type = "l", xlab="Degree", ylab="CCDF",main="Log-Log plot of Cumulative Strength Distribution")
+```
+
+
+## Betweenneess
+
+Consider betweenneess and closeness centrality. In this case the weights of the network are not considered as a "distance" measure, but on the contrary the greater is the weight of an edge connecting two nodes, the smaller the distance among them. 
+
+```{r weight, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+
+new_weight<-(E(giant_component)$weight)^(-1)
+closeness <- closeness(giant_component,vids=V(giant_component),mode="all",weights = new_weight,normalized = TRUE)
+betweenness <- betweenness(giant_component,v=V(giant_component),directed=FALSE,weights = new_weight,normalized = TRUE)
+
+```
+
+
+```{r betweenneess, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  
+  ggraph(giant_component) +
+  geom_edge_link() +
+  geom_node_point(aes(size = betweenness, 
+                      colour = betweenness)) + 
+  scale_color_gradient(guide = 'legend')
+
+```
+## Closeness
+
+```{r closeness, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  
+  ggraph(giant_component) +
+  geom_edge_link() +
+  geom_node_point(aes(size = closeness, 
+                      colour = closeness)) + 
+  scale_color_gradient(guide = 'legend')
+
+```
+## Robustness of Centrality Measures
+If the size of the section for the detection of the nodes interactions changes, how the network and the associated centrality measures changes? 
+And how are these measure correlated one respect to the other? 
+
+```{r correlation, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+
+degree_data<-degree(giant_component)
+strength_data<-strength(giant_component, mode="total")
+dfr<-data.frame(betweenness,closeness,degree_data,strength_data)
+Pearson_correlation<-cor(dfr)
+```
+
+```{r correlation2, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  Pearson_correlation
+  
+```
+
+## Robustness of Centrality Measures cont
+Correlations among centrality measures among themselves using 6,12 and 18 lines for the dimension of the session
+
+```{r correlation3, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+
+load("df1.Rda")
+load("df2.Rda")
+load("df3.Rda")
+df1<-df1%>%mutate(word=row.names(df1))
+df2<-df2%>%mutate(word=row.names(df2))
+df3<-df3%>%mutate(word=row.names(df3))
+words<-intersect(df1$word,df2$word)
+words<-intersect(words,df3$word)
+df1<-df1%>%filter(word %in% words)
+df2<-df2%>%filter(word %in% words)
+df3<-df3%>%filter(word %in% words)
+df2<-df2%>%rename(bet2=bet,clos2 = clos,degree_data2 = degree_data,strength_data2=strength_data)
+df3<-df3%>%rename(bet3=bet,clos3 = clos,degree_data3 = degree_data,strength_data3=strength_data)
+df_tot<-data.frame(df1$bet,df2$bet2,df3$bet3,df1$clos,df2$clos2,df3$clos3,df1$degree_data,df2$degree_data2,df3$degree_data3,df1$strength_data,df2$strength_data2,df3$strength_data3)
+Pearson_correlation_tot<-cor(df_tot)
+```
+
+```{r correlation4, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  Pearson_correlation_tot
+  
+```
+## Correlation Plot  
+  
+```{r correlation5, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  corrplot(Pearson_correlation_tot, type="upper", order="hclust",
+         col=brewer.pal(n=8, name="RdYlBu"))
+  
+``` 
+
+
+
+## Community Detection 
+Louvain Algorithm for community Detection
+```{r community, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  
+lc<-cluster_louvain(giant_component, weights = Weight)
+groups <- lc$membership
+#membership(lc)
+#communities(lc)
+#plot(lc, giant_component)
+imc <- cluster_infomap(giant_component)
+#membership(imc)
+#communities(imc)
+#plot(lc, giant_component)
+
+```
+```{r community_plot, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  ggraph(giant_component) +
+  geom_edge_link(aes(alpha = Weight)) +
+  geom_node_point(aes(size = Strength, 
+                      colour = groups)) + 
+  scale_color_gradient(guide = 'legend')
+
+
+```
+
+
+
+## What is the book about ? 
+Most used words
+```{r text, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+  book <-wp_book%>%unnest_tokens(word,text)%>%anti_join(new_stop_words)%>%mutate(word = str_replace(word,"'s|’s",""))%>%filter(!word %in% nodes_places$word)
+words_cloud <- book%>%
+  count(word)%>%with(wordcloud(word, n, max.words = 100))
+
+
+```
+
+## Sentiment Journey with the main characters 
+
+How change the sentiment of the characters among the fifteen books? 
+```{r sentiment, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+ characters <-c("andrew bolkónski prince","bolkónskaya mary princess","bagratión prince","count ilyá rostóv","pierre" ,"anna pávlovna schérer","countess natásha rostóva","sónya")
+section_words<- war_peace%>%mutate(chapter = cumsum(str_detect(text, regex("^(Chapter|CHAPTER) [\\divxlc]", ignore_case = TRUE))))%>%filter(!chapter==0)
+section_words <-section_words%>%mutate(section = row_number()%/%6)%>%filter(section>0)%>%mutate(book = 1+cumsum(str_detect(text, str_b)))%>%unnest_tokens(word,text)%>%
+  anti_join(new_stop_words)%>%mutate(word = str_replace(word,"'s|’s",""))
+
+book_sentiment <- section_words %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(book,section, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+
+ch_sentiment<-c()
+for (ch in characters){
+  sections_ch<-unique((nodes_interactions%>%filter(word==ch))$section)
+  sentiment_ch<-book_sentiment%>%filter(section %in% sections_ch)
+  s<-sentiment_ch%>%group_by(book)%>%summarize(tot = sum(sentiment))
+  ch_sentiment<-c(ch_sentiment,s)
+}
+
+dfsent<-data.frame(characters)
+
+
+ 
+  for(f in 1:15){
+      b<- c()
+     
+       for(i in 1:8){
+           
+             a<-which(ch_sentiment[2*i-1]$book==f)
+             if(length(a)==0){
+                 b<-c(b,0)
+               }else{ 
+                   b<-c(b,ch_sentiment[2*i]$tot[a])
+                     }
+             }
+    dfsent[[f+1]]<-b
+    }
+ 
+  
+dfsent<-dfsent%>%rename(book1=V2,book2=V3,book3=V4,book4=V5,book5=V6,book6=V7,book7=V8,book8=V9,book9=V10,
+                        book10=V11,book11=V12,book12=V13,book13=V14,book14=V15,book15=V16)
+dfsent<-dfsent%>%rename(character=characters)
+dfsent.row.names = character
+
+
+sentiment_book<-write.csv(dfsent,"sent.csv")
+
+```
+
+```{r sent_char, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+sentiment_book <- read.csv("sent.csv", row.names = 2)
+#sentiment_book <- read.csv("sent.csv", row.names = 2)
+d3heatmap(sentiment_book,scale = "column", colors = "Spectral",
+          dendrogram = "none", Rowv =FALSE, Colv = FALSE)
+
+```
+
+## Sentiment analysis 
+
+From the plot we can detect sudden changes in the character lives, for instance in the case of the character "Pierre", in the books 12, 13, 14. 
+What happened? 
+it is possible to show a cloud of words related to him and to these books. 
+
+```{r cloud2, include= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+ 
+worst_char <-"pierre"
+sections_ch1<-unique((nodes_interactions%>%filter(word==worst_char))$section)
+section_wors_char <- section_words%>%filter(section %in% sections_ch1)
+s1<-section_wors_char%>%filter(!word %in% backup_nodi$word)
+s1<-s1%>%filter(book ==14|book==13|book==12)
+
+```
+```{r cloud3, echo= FALSE, warning = FALSE,message = FALSE, cache=TRUE}
+words_cloud <- s1%>%
+  count(word)%>%with(wordcloud(word, n, max.words = 100))
+
+```
+
+
+## Conclusion
+
+* As seen, the methods of text analysis have also been found to be useful for revealing the structure of networks, and in turn the methods of network science prove to be useful in analyzing the text.
+* The interaction network has proved to be robust to changes in node and edge detection methods, and equally robust were centrality measures such as degree centrality, strength and betweenness. 
+* Morevore the text analysis allows to understand the main topics of the book and to detect the principal events in the lives of the characters. 
+
+
+

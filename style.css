@@ -1,0 +1,25 @@
+<style>
+pre {
+  background-color: lightblue;
+}
+
+h1 {
+  color: red;
+  text-align: center;
+}
+
+p {
+  font-family: verdana;
+  font-size: 20px;
+}
+pre {
+  white-space: pre !important;
+  overflow-y: scroll !important;
+  word-break: keep-all !important;
+  word-wrap: initial !important;
+  max-height: 50vh !important;
+}
+</style>
+
+
+
